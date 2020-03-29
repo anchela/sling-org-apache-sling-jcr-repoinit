@@ -71,6 +71,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class PrincipalBasedAclTest {
 
@@ -165,19 +166,9 @@ public class PrincipalBasedAclTest {
      * @throws Exception If the repository login fails.
      */
     private Session loginSystemUserPrincipal(final String systemUserPrincipalName) throws Exception {
-        SystemUserPrincipal principal = new SystemUserPrincipal() {
-            @Override
-            public String getName() {
-                return systemUserPrincipalName;
-            }
-        };
+        SystemUserPrincipal principal = () -> systemUserPrincipalName;
         Subject subject = new Subject(true, Collections.singleton(principal), Collections.emptySet(), Collections.emptySet());
-        return Subject.doAs(subject, new PrivilegedExceptionAction<Session>() {
-            @Override
-            public Session run() throws Exception {
-                return repository.login(null, null);
-            }
-        });
+        return Subject.doAs(subject, (PrivilegedExceptionAction<Session>) () -> repository.login(null, null));
     }
 
     private static void assertPermission(Session userSession, String absolutePath, String actions, boolean successExpected) throws RepositoryException {
@@ -589,12 +580,10 @@ public class PrincipalBasedAclTest {
 
     @Test
     public void testHomePath() throws Exception {
-        UserManager uMgr = ((JackrabbitSession) U.adminSession).getUserManager();
-        Authorizable a = uMgr.getAuthorizable(U.username);
-        Principal principal = a.getPrincipal();
+        Authorizable su = getServiceUser(U.adminSession, U.username);
+        Principal principal = su.getPrincipal();
 
-        JackrabbitAccessControlManager accessControlManager = AclUtil.getJACM(U.adminSession);
-        assertNull(getAcl(principal, accessControlManager));
+        assertNull(getAcl(principal, U.adminSession));
 
         AclLine line = new AclLine(AclLine.Action.ALLOW);
         line.setProperty(AclLine.PROP_PRINCIPALS, Collections.singletonList(principal.getName()));
@@ -602,12 +591,12 @@ public class PrincipalBasedAclTest {
         line.setProperty(AclLine.PROP_PATHS, Collections.singletonList(":home:"+U.username+"#"));
         AclUtil.setPrincipalAcl(U.adminSession, U.username, Collections.singletonList(line));
 
-        PrincipalAccessControlList acl = getAcl(principal, accessControlManager);
+        PrincipalAccessControlList acl = getAcl(principal, U.adminSession);
         assertNotNull(acl);
         assertEquals(1, acl.size());
         PrincipalAccessControlList.Entry entry = (PrincipalAccessControlList.Entry) acl.getAccessControlEntries()[0];
-        assertArrayEquals(AccessControlUtils.privilegesFromNames(accessControlManager, Privilege.JCR_READ), entry.getPrivileges());
-        assertEquals(a.getPath(), entry.getEffectivePath());
+        assertArrayEquals(AccessControlUtils.privilegesFromNames(AclUtil.getJACM(U.adminSession), Privilege.JCR_READ), entry.getPrivileges());
+        assertEquals(su.getPath(), entry.getEffectivePath());
     }
 
     @Test
@@ -621,7 +610,7 @@ public class PrincipalBasedAclTest {
                     + "end";
             U.parseAndExecute(setup);
 
-            PrincipalAccessControlList acl = getAcl(su.getPrincipal(), AclUtil.getJACM(U.adminSession));
+            PrincipalAccessControlList acl = getAcl(su.getPrincipal(), U.adminSession);
             assertNotNull(acl);
             assertEquals(1, acl.size());
         } finally {
@@ -634,9 +623,207 @@ public class PrincipalBasedAclTest {
         }
     }
 
+    @Test(expected = RuntimeException.class)
+    public void testRemoveNoExistingPolicy() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "remove jcr:read on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testRemoveMatchingEntry() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove jcr:write on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testRemoveNoMatchingEntry() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove jcr:read on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testRemoveNonExistingPrincipal() throws Exception {
+        String setup = "set principal ACL for nonExistingPrincipal\n"
+                + "remove jcr:write on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testRemovePrincipalMismatch() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+        U.parseAndExecute("create service user otherSystemPrincipal");
+
+        setup = "set principal ACL for otherSystemPrincipal\n"
+                + "remove jcr:write on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test
+    public void testRemoveAllNoExistingPolicy() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        assertNull(getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession));
+    }
+
+    @Test(expected = RuntimeException.class)
+    public void testAllRemoveNonExistingPrincipal() throws Exception {
+        String setup = "set principal ACL for nonExistingPrincipal\n"
+                + "remove * on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    @Test
+    public void testRemoveAll() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        PrincipalAccessControlList acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertTrue(acl.isEmpty());
+    }
+
+    @Test
+    public void testRemoveAllRepositoryPath() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "allow jcr:namespaceManagement on :repository\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        PrincipalAccessControlList acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(2, acl.size());
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on :repository\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(1, acl.size());
+    }
+
+    @Test
+    public void testRemoveAllPartialPathMatch() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "allow jcr:write on /another/path\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        PrincipalAccessControlList acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(2, acl.size());
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(1, acl.size());
+    }
+
+    @Test
+    public void testRemoveAllMultiplePaths() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "allow jcr:write on home("+U.username+")\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        PrincipalAccessControlList acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(2, acl.size());
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on " + path + ", home("+U.username+")\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertTrue(acl.isEmpty());
+    }
+
+    @Test
+    public void testRemoveAllPathMismatch() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        setup = "set principal ACL for " + U.username + "\n"
+                + "remove * on /another/path\n"
+                + "end";
+        U.parseAndExecute(setup);
+
+        PrincipalAccessControlList acl = getAcl(getServiceUser(U.adminSession, U.username).getPrincipal(), U.adminSession);
+        assertNotNull(acl);
+        assertEquals(1, acl.size());
+    }
+
+    @Test
+    public void testRemoveAllPrincipalMismatch() throws Exception {
+        String setup = "set principal ACL for " + U.username + "\n"
+                + "allow jcr:write on "+path+"\n"
+                + "end";
+        U.parseAndExecute(setup);
+        U.parseAndExecute("create service user otherSystemPrincipal");
+
+        setup = "set principal ACL for otherSystemPrincipal\n"
+                + "remove * on " + path + "\n"
+                + "end";
+        U.parseAndExecute(setup);
+    }
+
+    private static Authorizable getServiceUser(@NotNull Session session, @NotNull String uid) throws RepositoryException {
+        UserManager uMgr = ((JackrabbitSession) session).getUserManager();
+        Authorizable a = uMgr.getAuthorizable(uid);
+        if (a != null) {
+            return a;
+        } else {
+            throw new RepositoryException("Expected service user " + uid + " to exist.");
+        }
+    }
+
     @Nullable
-    private static PrincipalAccessControlList getAcl(@NotNull Principal principal, @NotNull JackrabbitAccessControlManager jacm) throws RepositoryException {
-        for (AccessControlPolicy policy : jacm.getPolicies(principal)) {
+    private static PrincipalAccessControlList getAcl(@NotNull Principal principal, @NotNull Session session) throws RepositoryException {
+        for (AccessControlPolicy policy : AclUtil.getJACM(session).getPolicies(principal)) {
             if (policy instanceof PrincipalAccessControlList) {
                 return (PrincipalAccessControlList) policy;
             }
